@@ -64,6 +64,7 @@ type MapReduce struct {
 	Workers map[string]*WorkerInfo
 
 	// add any additional state here
+	idleChannel chan string
 }
 
 func InitMapReduce(nmap int, nreduce int,
@@ -76,6 +77,7 @@ func InitMapReduce(nmap int, nreduce int,
 	mr.alive = true
 	mr.registerChannel = make(chan string)
 	mr.DoneChannel = make(chan bool)
+	mr.idleChannel = make(chan string)
 
 	// initialize any additional state here
 	return mr
