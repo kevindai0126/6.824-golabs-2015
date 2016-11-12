@@ -10,14 +10,47 @@ import "os"
 import "sync/atomic"
 
 type ViewServer struct {
-	mu       sync.Mutex
-	l        net.Listener
-	dead     int32 // for testing
-	rpccount int32 // for testing
-	me       string
+	mu           sync.Mutex
+	l            net.Listener
+	dead         int32 // for testing
+	rpccount     int32 // for testing
+	me           string
 
+			   // Your declarations here.
+	view         View
+	times        map[string]uint
+	primaryAcked uint
+	backupAcked  uint
+	currentTick  uint
+}
 
-	// Your declarations here.
+func (vs *ViewServer) IsAcked() bool {
+	return vs.view.Primary != "" && vs.primaryAcked == vs.view.Viewnum
+}
+
+func (vs *ViewServer) IsPrimary(name string) bool {
+	return vs.view.Primary == name
+}
+
+func (vs *ViewServer) IsBackup(name string) bool {
+	return vs.view.Backup == name
+}
+
+func (vs *ViewServer) HasPrimary() bool {
+	return vs.view.Primary != ""
+}
+
+func (vs *ViewServer) HasBackup() bool {
+	return vs.view.Backup != ""
+}
+
+func (vs *ViewServer) PromoteBackupAsPrimary() {
+	if vs.HasBackup() {
+		vs.view.Primary = vs.view.Backup
+		vs.view.Backup = ""
+		vs.view.Viewnum++
+		vs.primaryAcked = vs.backupAcked
+	}
 }
 
 //
@@ -26,7 +59,40 @@ type ViewServer struct {
 func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 
 	// Your code here.
+	Viewnum := args.Viewnum
+	Server := args.Me
+	vs.times[Server] = vs.currentTick
 
+	vs.mu.Lock()
+
+	if Viewnum == 0 && !vs.HasPrimary() {
+		vs.view.Primary = Server
+		vs.view.Viewnum++
+		vs.primaryAcked = 0
+	} else if vs.IsPrimary(Server) {
+		//Primary crashed and restarted, proceeds to a new view
+		if Viewnum == 0 && vs.IsAcked() {
+			vs.PromoteBackupAsPrimary()
+		} else {
+			vs.primaryAcked = Viewnum
+		}
+	} else if vs.IsBackup(Server) {
+		//Backup crashed and restarted, proceeds to a new view
+		if Viewnum == 0 && vs.IsAcked() {
+			vs.view.Backup = Server
+			vs.view.Viewnum++
+		} else if Viewnum != 0 {
+			vs.backupAcked = Viewnum
+		}
+	} else if !vs.HasBackup() && vs.IsAcked() {
+		//There is no backup and there is an idle server, proceeds to a new view
+		vs.view.Backup = Server
+		vs.view.Viewnum++
+	}
+
+	vs.mu.Unlock()
+
+	reply.View = vs.view
 	return nil
 }
 
@@ -36,7 +102,7 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
-
+	reply.View = vs.view
 	return nil
 }
 
@@ -49,6 +115,27 @@ func (vs *ViewServer) Get(args *GetArgs, reply *GetReply) error {
 func (vs *ViewServer) tick() {
 
 	// Your code here.
+	vs.currentTick++
+	vs.mu.Lock()
+
+	//Hasn't received recent Pings from both primary, proceeds to a new view
+	if(vs.HasPrimary()) {
+		primaryTick, ok := vs.times[vs.view.Primary]
+		if ok && vs.currentTick - primaryTick >= DeadPings && vs.IsAcked() {
+			vs.PromoteBackupAsPrimary()
+		}
+	}
+
+	//Hasn't received recent Pings from both backup, proceeds to a new view
+	if (vs.HasBackup()) {
+		backupTick, ok := vs.times[vs.view.Backup]
+		if ok && vs.currentTick - backupTick >= DeadPings && vs.IsAcked() {
+			vs.view.Backup = ""
+			vs.view.Viewnum++
+		}
+	}
+
+	vs.mu.Unlock()
 }
 
 //
@@ -77,6 +164,11 @@ func StartServer(me string) *ViewServer {
 	vs := new(ViewServer)
 	vs.me = me
 	// Your vs.* initializations here.
+	vs.view = View{0, "", ""}
+	vs.times = make(map[string]uint)
+	vs.primaryAcked = 0
+	vs.backupAcked = 0
+	vs.currentTick = 0
 
 	// tell net/rpc about our RPC server and handlers.
 	rpcs := rpc.NewServer()
