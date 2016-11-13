@@ -19,6 +19,7 @@ type ViewServer struct {
 			   // Your declarations here.
 	view         View
 	times        map[string]uint
+	tmu          sync.Mutex
 	primaryAcked uint
 	backupAcked  uint
 	currentTick  uint
@@ -61,7 +62,9 @@ func (vs *ViewServer) Ping(args *PingArgs, reply *PingReply) error {
 	// Your code here.
 	Viewnum := args.Viewnum
 	Server := args.Me
+	vs.tmu.Lock()
 	vs.times[Server] = vs.currentTick
+	vs.tmu.Unlock()
 
 	vs.mu.Lock()
 
