@@ -25,11 +25,11 @@ type PBServer struct {
 	vs         *viewservice.Clerk
 	// Your declarations here.
 
-	view viewservice.View
-	storage map[string]string
-	smu	sync.Mutex
-	seen 	map[int64]Err
-	semu    sync.Mutex
+	view viewservice.View //current view
+	storage map[string]string //kv storage
+	smu	sync.Mutex //mutex for accessing storage
+	seen 	map[string]int64 // store the seen uid for put request
+	semu    sync.Mutex //mutex for accessing seen
 
 }
 
@@ -41,33 +41,54 @@ func (pb *PBServer) isBackup() bool {
 	return pb.me == pb.view.Backup
 }
 
+func (pb *PBServer) hasSeen(from string, uid int64) bool {
+	pb.semu.Lock()
+	re, ok := pb.seen[from]
+	pb.semu.Unlock()
 
-func (pb *PBServer) Forward(key string, value string, op string, uid int64) error {
-	if(pb.view.Backup != "") {
-		args := ForwardArgs{PutAppendArgs{key, value, op, uid}}
-		var reply ForwardReply
-
-		ok := call(pb.view.Backup, "PBServer.DoForward", &args, &reply)
-		if !ok {
-			return errors.New(ErrForward)
-		}
-	}
-
-	return nil
+	return ok && re == uid
 }
 
+func (pb *PBServer) setSeen(from string, uid int64) {
+	pb.semu.Lock()
+	pb.seen[from] = uid
+	pb.semu.Unlock()
+}
+
+func (pb *PBServer) Forward(key string, value string, op string, uid int64, from string) {
+	if(pb.view.Backup != "") {
+		args := ForwardArgs{PutAppendArgs{key, value, op, uid, from}}
+		var reply ForwardReply
+
+		view := pb.view
+		for {
+			ok := call(view.Backup, "PBServer.DoForward", &args, &reply)
+			if ok {
+				return
+			} else {
+				newview, ok := pb.vs.Ping(view.Viewnum)
+				if(ok == nil) {
+					view = newview
+				}
+			}
+		}
+	}
+}
+
+//Forward the Put request to backup
 func (pb *PBServer) DoForward(args *ForwardArgs, reply *ForwardReply) error {
 	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
 	if(pb.isPrimary()) {
-		pb.mu.Unlock()
-		return errors.New(ErrForward)
+		return errors.New("It's Primary")
 	} else {
+		if(pb.hasSeen(args.Args.From, args.Args.Uid)) {
+			return nil
+		}
+
 		pb.WritePut(args.Args.Key, args.Args.Value, args.Args.Op)
-		pb.mu.Unlock()
-		pb.semu.Lock()
-		pb.seen[args.Args.Uid] = OK
-		pb.semu.Unlock()
-		//pb.PutAppend(&args.Args, &reply.Reply)
+		pb.setSeen(args.Args.From, args.Args.Uid)
 	}
 
 	return nil
@@ -87,22 +108,22 @@ func (pb *PBServer) Transfer(content map[string]string) error {
 	return nil
 }
 
+//Transfer the complete kv from the primary to the newly promoted backup
 func (pb *PBServer) DoTransfer(args *TransferArgs, reply *TransferReply) error {
 	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
 	if(!pb.isBackup()) {
-		pb.mu.Unlock()
 		return errors.New(ErrTransfer)
 	} else {
 		pb.smu.Lock()
 		pb.storage = args.Content
 		pb.smu.Unlock()
 		reply.Err = OK
-
 		pb.semu.Lock()
 		pb.seen = args.Seen
 		pb.semu.Unlock()
 	}
-	pb.mu.Unlock()
 
 	return nil
 }
@@ -111,9 +132,13 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 
 	// Your code here.
 	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
 	if(pb.isPrimary()) {
 		key := args.Key
+		pb.smu.Lock()
 		value, ok := pb.storage[key]
+		pb.smu.Unlock()
 		if ok {
 			reply.Value = value
 			reply.Err = OK
@@ -125,13 +150,15 @@ func (pb *PBServer) Get(args *GetArgs, reply *GetReply) error {
 		reply.Value = ""
 		reply.Err = ErrWrongServer
 	}
-	pb.mu.Unlock()
+
 	return nil
 }
 
 
 func (pb *PBServer) WritePut(key string, value string, op string) {
 	pb.smu.Lock()
+	defer pb.smu.Unlock()
+
 	switch op {
 	case "Put":
 		pb.storage[key] = value
@@ -143,34 +170,26 @@ func (pb *PBServer) WritePut(key string, value string, op string) {
 			pb.storage[key] = value
 		}
 	}
-	pb.smu.Unlock()
 }
 
 func (pb *PBServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) error {
 
 	// Your code here.
 	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
 	if(pb.isPrimary()) {
-		re, ok := pb.seen[args.Uid]
-		if ok {
-			reply.Err = re
+		if(pb.hasSeen(args.From, args.Uid)) {
+			reply.Err = OK
 		} else {
-			ok := pb.Forward(args.Key, args.Value, args.Op, args.Uid)
-			if ok == nil {
-				pb.WritePut(args.Key, args.Value, args.Op)
-				reply.Err = OK
-				pb.semu.Lock()
-				pb.seen[args.Uid] = reply.Err
-				pb.semu.Unlock()
-			} else {
-				pb.mu.Unlock()
-				return errors.New(ErrForward)
-			}
+			pb.Forward(args.Key, args.Value, args.Op, args.Uid, args.From)
+			pb.setSeen(args.From, args.Uid)
+			pb.WritePut(args.Key, args.Value, args.Op)
+			reply.Err = OK
 		}
 	} else {
 		reply.Err = ErrWrongServer
 	}
- 	pb.mu.Unlock()
 
 	return nil
 }
@@ -186,6 +205,8 @@ func (pb *PBServer) tick() {
 
 	// Your code here.
 	pb.mu.Lock()
+	defer pb.mu.Unlock()
+
 	view, err := pb.vs.Ping(pb.view.Viewnum)
 
 	if err != nil {
@@ -198,8 +219,6 @@ func (pb *PBServer) tick() {
 	if needTransfer {
 		pb.Transfer(pb.storage)
 	}
-
-	pb.mu.Unlock()
 }
 
 // tell the server to shut itself down.
@@ -234,7 +253,7 @@ func StartServer(vshost string, me string) *PBServer {
 	pb.vs = viewservice.MakeClerk(me, vshost)
 	// Your pb.* initializations here.
 	pb.storage = make(map[string]string)
-	pb.seen = make(map[int64]Err)
+	pb.seen = make(map[string]int64)
 	pb.view = viewservice.View{0, "", ""}
 
 	rpcs := rpc.NewServer()

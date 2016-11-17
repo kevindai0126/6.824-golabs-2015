@@ -424,13 +424,16 @@ func checkAppends(t *testing.T, v string, counts []int) {
 			wanted := "x " + strconv.Itoa(i) + " " + strconv.Itoa(j) + " y"
 			off := strings.Index(v, wanted)
 			if off < 0 {
+				t.Fatal(wanted)
 				t.Fatalf("missing element in Append result")
 			}
 			off1 := strings.LastIndex(v, wanted)
 			if off1 != off {
+				t.Fatal(wanted)
 				t.Fatalf("duplicate element in Append result")
 			}
 			if off <= lastoff {
+				t.Fatal(wanted)
 				t.Fatalf("wrong order for element in Append result")
 			}
 			lastoff = off

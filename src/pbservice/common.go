@@ -4,7 +4,6 @@ const (
 	OK             = "OK"
 	ErrNoKey       = "ErrNoKey"
 	ErrWrongServer = "ErrWrongServer"
-	ErrForward	= "ErrForward"
 	ErrTransfer	= "ErrTransfer"
 )
 
@@ -17,6 +16,7 @@ type PutAppendArgs struct {
 	// You'll have to add definitions here.
 	Op string
 	Uid int64
+	From  string
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
 }
@@ -28,6 +28,8 @@ type PutAppendReply struct {
 type GetArgs struct {
 	Key string
 	// You'll have to add definitions here.
+	Uid int64
+	From  string
 }
 
 type GetReply struct {
@@ -46,7 +48,7 @@ type ForwardReply struct {
 
 type TransferArgs struct {
 	Content map[string]string
-	Seen	map[int64]Err
+	Seen	map[string]int64
 }
 
 type TransferReply struct {

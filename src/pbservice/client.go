@@ -8,13 +8,15 @@ import "crypto/rand"
 import (
 	"math/big"
 	"time"
+	"strconv"
 )
 
 
 type Clerk struct {
 	vs *viewservice.Clerk
 	// Your declarations here
-	view viewservice.View
+	view viewservice.View //current view
+	me string
 }
 
 // this may come in handy.
@@ -30,6 +32,7 @@ func MakeClerk(vshost string, me string) *Clerk {
 	ck.vs = viewservice.MakeClerk(me, vshost)
 	// Your ck.* initializations here
 	ck.view = viewservice.View{0, "", ""}
+	ck.me = strconv.FormatInt(nrand(), 10)
 
 	return ck
 }
@@ -69,6 +72,7 @@ func call(srv string, rpcname string,
 	return false
 }
 
+//Ping view service to update the current view
 func (ck *Clerk) Update() {
 	view, err := ck.vs.Ping(ck.view.Viewnum)
 
@@ -89,14 +93,15 @@ func (ck *Clerk) Update() {
 func (ck *Clerk) Get(key string) string {
 
 	// Your code here.
-	args := GetArgs{key}
+	uid := nrand()
+	args := GetArgs{key, uid, ck.me}
 	var reply GetReply
+
 	for {
-		var ok = call(ck.view.Primary, "PBServer.Get", &args, &reply)
+		ok := call(ck.view.Primary, "PBServer.Get", &args, &reply)
 
-		if ok && reply.Err != ErrWrongServer {
+		if ok && (reply.Err == OK || reply.Err == ErrNoKey) {
 			return reply.Value
-
 		}
 
 		time.Sleep(viewservice.PingInterval)
@@ -111,15 +116,14 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 
 	// Your code here.
 	uid := nrand()
-	args := PutAppendArgs{key, value, op, uid}
+	args := PutAppendArgs{key, value, op, uid, ck.me}
 	var reply PutAppendReply
 
 	for {
 		var ok = call(ck.view.Primary, "PBServer.PutAppend", &args, &reply)
 
-		if ok && reply.Err != ErrWrongServer  {
+		if ok && reply.Err == OK {
 			return
-
 		}
 
 		time.Sleep(viewservice.PingInterval)
